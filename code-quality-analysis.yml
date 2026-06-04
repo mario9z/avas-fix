@@ -1,0 +1,119 @@
+name: Code Quality Analysis (TEM / CQM / SAM)
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      target_score:
+        description: "Minimum passing score for TEM, CQM, SAM (0-100)"
+        required: false
+        default: "80"
+      auto_fix:
+        description: "Auto-commit fixes if score is below target"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+env:
+  TARGET_SCORE: ${{ github.event.inputs.target_score || '80' }}
+  AUTO_FIX: ${{ github.event.inputs.auto_fix || 'false' }}
+  AWS_REGION: us-east-1
+  BEDROCK_MODEL_ID: anthropic.claude-3-5-sonnet-20241022-v2:0
+
+jobs:
+  analyze:
+    name: Analyze Code Quality
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install boto3 PyGithub
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Detect changed files
+        id: changed
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git diff --name-only origin/${{ github.base_ref }}...HEAD \
+              | grep -E '\.(py|js|ts|java|go|cs|cpp|rb|php)$' \
+              > changed_files.txt || true
+          else
+            git diff --name-only HEAD~1 HEAD \
+              | grep -E '\.(py|js|ts|java|go|cs|cpp|rb|php)$' \
+              > changed_files.txt || true
+          fi
+          echo "files=$(cat changed_files.txt | tr '\n' ',' | sed 's/,$//')" >> $GITHUB_OUTPUT
+          echo "count=$(wc -l < changed_files.txt)" >> $GITHUB_OUTPUT
+          cat changed_files.txt
+
+      - name: Run TEM / CQM / SAM analysis
+        id: analysis
+        env:
+          CHANGED_FILES: ${{ steps.changed.outputs.files }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_NAME: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python scripts/analyze_code_quality.py \
+            --files-list changed_files.txt \
+            --target-score ${{ env.TARGET_SCORE }} \
+            --auto-fix ${{ env.AUTO_FIX }} \
+            --model-id ${{ env.BEDROCK_MODEL_ID }} \
+            --output-file analysis_report.json
+
+      - name: Upload analysis report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: code-quality-report
+          path: analysis_report.json
+          retention-days: 30
+
+      - name: Post PR comment
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python scripts/post_pr_comment.py \
+            --report analysis_report.json \
+            --pr-number ${{ github.event.pull_request.number }} \
+            --repo ${{ github.repository }}
+
+      - name: Commit fixes
+        if: env.AUTO_FIX == 'true' && steps.analysis.outputs.fixes_applied == 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: auto-fix code quality issues (TEM/CQM/SAM) [skip ci]"
+          git push
+
+      - name: Enforce score gate
+        run: |
+          python scripts/check_score_gate.py \
+            --report analysis_report.json \
+            --target-score ${{ env.TARGET_SCORE }}

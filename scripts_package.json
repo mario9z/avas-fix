@@ -1,0 +1,14 @@
+{
+  "name": "code-quality-scripts",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "TEM/CQM/SAM code quality analysis scripts for GitHub Actions",
+  "scripts": {
+    "analyze": "node analyze_code_quality.mjs",
+    "comment": "node post_pr_comment.mjs",
+    "gate": "node check_score_gate.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.600.0"
+  }
+}
